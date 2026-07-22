@@ -211,12 +211,6 @@ impl<'b> AddAssign<&'b MillerLoopResult> for MillerLoopResult {
 #[derive(Copy, Clone, Debug)]
 pub struct Gt(pub(crate) Fp12);
 
-impl Default for Gt {
-    fn default() -> Self {
-        Self::identity()
-    }
-}
-
 #[cfg(feature = "zeroize")]
 impl zeroize::DefaultIsZeroes for Gt {}
 
@@ -556,7 +550,6 @@ impl Group for Gt {
         self.ct_eq(&Self::identity())
     }
 
-    #[must_use]
     fn double(&self) -> Self {
         self.double()
     }
