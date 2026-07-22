@@ -1,5 +1,5 @@
 [package]
-name = "irmaseal-curve"
+name = "bls12_381"
 version = "0.8.0"
 authors = [
     "Wouter Geraedts <git@woutergeraedts.nl>",
