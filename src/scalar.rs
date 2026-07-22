@@ -1,11 +1,15 @@
 //! This module provides an implementation of the BLS12-381 scalar field $\mathbb{F}_q$
 //! where `q = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`
 
-use core::convert::TryFrom;
 use core::fmt;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use rand_core::RngCore;
 
+use ff::{Field, PrimeField};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
+
+#[cfg(feature = "bits")]
+use ff::{FieldBits, PrimeFieldBits};
 
 use crate::util::{adc, mac, sbb};
 
@@ -28,6 +32,12 @@ impl fmt::Debug for Scalar {
     }
 }
 
+impl fmt::Display for Scalar {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 impl From<u64> for Scalar {
     fn from(val: u64) -> Scalar {
         Scalar([val, 0, 0, 0]) * R2
@@ -46,7 +56,7 @@ impl ConstantTimeEq for Scalar {
 impl PartialEq for Scalar {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.ct_eq(other).unwrap_u8() == 1
+        bool::from(self.ct_eq(other))
     }
 }
 
@@ -64,10 +74,34 @@ impl ConditionallySelectable for Scalar {
 /// Constant representing the modulus
 /// q = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
 pub(crate) const MODULUS: Scalar = Scalar([
-    0xffffffff00000001,
-    0x53bda402fffe5bfe,
-    0x3339d80809a1d805,
-    0x73eda753299d7d48,
+    0xffff_ffff_0000_0001,
+    0x53bd_a402_fffe_5bfe,
+    0x3339_d808_09a1_d805,
+    0x73ed_a753_299d_7d48,
+]);
+
+/// The modulus as u32 limbs.
+#[cfg(all(feature = "bits", not(target_pointer_width = "64")))]
+const MODULUS_LIMBS_32: [u32; 8] = [
+    0x0000_0001,
+    0xffff_ffff,
+    0xfffe_5bfe,
+    0x53bd_a402,
+    0x09a1_d805,
+    0x3339_d808,
+    0x299d_7d48,
+    0x73ed_a753,
+];
+
+// The number of bits needed to represent the modulus.
+const MODULUS_BITS: u32 = 255;
+
+// GENERATOR = 7 (multiplicative generator of r-1 order, that is also quadratic nonresidue)
+const GENERATOR: Scalar = Scalar([
+    0x0000_000e_ffff_fff1,
+    0x17e3_63d3_0018_9c0f,
+    0xff9c_5787_6f84_57b0,
+    0x3513_3220_8fc5_a8c4,
 ]);
 
 impl<'a> Neg for &'a Scalar {
@@ -119,32 +153,41 @@ impl_binops_additive!(Scalar, Scalar);
 impl_binops_multiplicative!(Scalar, Scalar);
 
 /// INV = -(q^{-1} mod 2^64) mod 2^64
-const INV: u64 = 0xfffffffeffffffff;
+const INV: u64 = 0xffff_fffe_ffff_ffff;
 
 /// R = 2^256 mod q
 const R: Scalar = Scalar([
-    0x00000001fffffffe,
-    0x5884b7fa00034802,
-    0x998c4fefecbc4ff5,
-    0x1824b159acc5056f,
+    0x0000_0001_ffff_fffe,
+    0x5884_b7fa_0003_4802,
+    0x998c_4fef_ecbc_4ff5,
+    0x1824_b159_acc5_056f,
 ]);
 
 /// R^2 = 2^512 mod q
 const R2: Scalar = Scalar([
-    0xc999e990f3f29c6d,
-    0x2b6cedcb87925c23,
-    0x05d314967254398f,
-    0x0748d9d99f59ff11,
+    0xc999_e990_f3f2_9c6d,
+    0x2b6c_edcb_8792_5c23,
+    0x05d3_1496_7254_398f,
+    0x0748_d9d9_9f59_ff11,
 ]);
 
 /// R^3 = 2^768 mod q
 const R3: Scalar = Scalar([
-    0xc62c1807439b73af,
-    0x1b3e0d188cf06990,
-    0x73d13c71c7b5f418,
-    0x6e2a5bb9c8db33e9,
+    0xc62c_1807_439b_73af,
+    0x1b3e_0d18_8cf0_6990,
+    0x73d1_3c71_c7b5_f418,
+    0x6e2a_5bb9_c8db_33e9,
 ]);
 
+/// 2^-1
+const TWO_INV: Scalar = Scalar([
+    0x0000_0000_ffff_ffff,
+    0xac42_5bfd_0001_a401,
+    0xccc6_27f7_f65e_27fa,
+    0x0c12_58ac_d662_82b7,
+]);
+
+// 2^S * t = MODULUS - 1 with t odd
 const S: u32 = 32;
 
 /// GENERATOR^t where t * 2^s + 1 = q
@@ -155,10 +198,27 @@ const S: u32 = 32;
 /// of the q - 1 order multiplicative
 /// subgroup.
 const ROOT_OF_UNITY: Scalar = Scalar([
-    0xb9b58d8c5f0e466a,
-    0x5b1b4c801819d7ec,
-    0x0af53ae352a31e64,
-    0x5bf3adda19e9b27b,
+    0xb9b5_8d8c_5f0e_466a,
+    0x5b1b_4c80_1819_d7ec,
+    0x0af5_3ae3_52a3_1e64,
+    0x5bf3_adda_19e9_b27b,
+]);
+
+/// ROOT_OF_UNITY^-1
+const ROOT_OF_UNITY_INV: Scalar = Scalar([
+    0x4256_481a_dcf3_219a,
+    0x45f3_7b7f_96b6_cad3,
+    0xf9c3_f1d7_5f7a_3b27,
+    0x2d2f_c049_658a_fd43,
+]);
+
+/// GENERATOR^{2^s} where t * 2^s + 1 = q with t odd.
+/// In other words, this is a t root of unity.
+const DELTA: Scalar = Scalar([
+    0x70e3_10d3_d146_f96a,
+    0x4b64_c089_19e2_99e6,
+    0x51e1_1418_6a8b_970d,
+    0x6185_d066_27c0_67cb,
 ]);
 
 impl Default for Scalar {
@@ -167,6 +227,9 @@ impl Default for Scalar {
         Self::zero()
     }
 }
+
+#[cfg(feature = "zeroize")]
+impl zeroize::DefaultIsZeroes for Scalar {}
 
 impl Scalar {
     /// Returns zero, the additive identity.
@@ -303,55 +366,6 @@ impl Scalar {
         let (r7, _) = adc(0, r7, carry);
 
         Scalar::montgomery_reduce(r0, r1, r2, r3, r4, r5, r6, r7)
-    }
-
-    /// Computes the square root of this element, if it exists.
-    pub fn sqrt(&self) -> CtOption<Self> {
-        // Tonelli-Shank's algorithm for q mod 16 = 1
-        // https://eprint.iacr.org/2012/685.pdf (page 12, algorithm 5)
-
-        // w = self^((t - 1) // 2)
-        //   = self^6104339283789297388802252303364915521546564123189034618274734669823
-        let w = self.pow_vartime(&[
-            0x7fff2dff7fffffff,
-            0x04d0ec02a9ded201,
-            0x94cebea4199cec04,
-            0x0000000039f6d3a9,
-        ]);
-
-        let mut v = S;
-        let mut x = self * w;
-        let mut b = x * w;
-
-        // Initialize z as the 2^S root of unity.
-        let mut z = ROOT_OF_UNITY;
-
-        for max_v in (1..=S).rev() {
-            let mut k = 1;
-            let mut tmp = b.square();
-            let mut j_less_than_v: Choice = 1.into();
-
-            for j in 2..max_v {
-                let tmp_is_one = tmp.ct_eq(&Scalar::one());
-                let squared = Scalar::conditional_select(&tmp, &z, tmp_is_one).square();
-                tmp = Scalar::conditional_select(&squared, &tmp, tmp_is_one);
-                let new_z = Scalar::conditional_select(&z, &squared, tmp_is_one);
-                j_less_than_v &= !j.ct_eq(&v);
-                k = u32::conditional_select(&j, &k, tmp_is_one);
-                z = Scalar::conditional_select(&z, &new_z, j_less_than_v);
-            }
-
-            let result = x * z;
-            x = Scalar::conditional_select(&result, &x, b.ct_eq(&Scalar::one()));
-            z = z.square();
-            b *= z;
-            v = k;
-        }
-
-        CtOption::new(
-            x,
-            (x * x).ct_eq(self), // Only return Some if it's the square root.
-        )
     }
 
     /// Exponentiates `self` by `by`, where `by` is a
@@ -613,6 +627,12 @@ impl Scalar {
     }
 }
 
+impl From<Scalar> for [u8; 32] {
+    fn from(value: Scalar) -> [u8; 32] {
+        value.to_bytes()
+    }
+}
+
 impl<'a> From<&'a Scalar> for [u8; 32] {
     fn from(value: &'a Scalar) -> [u8; 32] {
         value.to_bytes()
@@ -625,6 +645,182 @@ impl<'a> From<&'a Scalar> for [u64; 4] {
             Scalar::montgomery_reduce(value.0[0], value.0[1], value.0[2], value.0[3], 0, 0, 0, 0);
         res.0
     }
+}
+
+impl Field for Scalar {
+    const ZERO: Self = Self::zero();
+    const ONE: Self = Self::one();
+
+    fn random(mut rng: impl RngCore) -> Self {
+        let mut buf = [0; 64];
+        rng.fill_bytes(&mut buf);
+        Self::from_bytes_wide(&buf)
+    }
+
+    #[must_use]
+    fn square(&self) -> Self {
+        self.square()
+    }
+
+    #[must_use]
+    fn double(&self) -> Self {
+        self.double()
+    }
+
+    fn invert(&self) -> CtOption<Self> {
+        self.invert()
+    }
+
+    fn sqrt_ratio(num: &Self, div: &Self) -> (Choice, Self) {
+        ff::helpers::sqrt_ratio_generic(num, div)
+    }
+
+    fn sqrt(&self) -> CtOption<Self> {
+        // (t - 1) // 2 = 6104339283789297388802252303364915521546564123189034618274734669823
+        ff::helpers::sqrt_tonelli_shanks(
+            self,
+            &[
+                0x7fff_2dff_7fff_ffff,
+                0x04d0_ec02_a9de_d201,
+                0x94ce_bea4_199c_ec04,
+                0x0000_0000_39f6_d3a9,
+            ],
+        )
+    }
+
+    fn is_zero_vartime(&self) -> bool {
+        self.0 == Self::zero().0
+    }
+}
+
+impl PrimeField for Scalar {
+    type Repr = [u8; 32];
+
+    fn from_repr(r: Self::Repr) -> CtOption<Self> {
+        Self::from_bytes(&r)
+    }
+
+    fn to_repr(&self) -> Self::Repr {
+        self.to_bytes()
+    }
+
+    fn is_odd(&self) -> Choice {
+        Choice::from(self.to_bytes()[0] & 1)
+    }
+
+    const MODULUS: &'static str =
+        "0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001";
+    const NUM_BITS: u32 = MODULUS_BITS;
+    const CAPACITY: u32 = Self::NUM_BITS - 1;
+    const TWO_INV: Self = TWO_INV;
+    const MULTIPLICATIVE_GENERATOR: Self = GENERATOR;
+    const S: u32 = S;
+    const ROOT_OF_UNITY: Self = ROOT_OF_UNITY;
+    const ROOT_OF_UNITY_INV: Self = ROOT_OF_UNITY_INV;
+    const DELTA: Self = DELTA;
+}
+
+#[cfg(all(feature = "bits", not(target_pointer_width = "64")))]
+type ReprBits = [u32; 8];
+
+#[cfg(all(feature = "bits", target_pointer_width = "64"))]
+type ReprBits = [u64; 4];
+
+#[cfg(feature = "bits")]
+impl PrimeFieldBits for Scalar {
+    type ReprBits = ReprBits;
+
+    fn to_le_bits(&self) -> FieldBits<Self::ReprBits> {
+        let bytes = self.to_bytes();
+
+        #[cfg(not(target_pointer_width = "64"))]
+        let limbs = [
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+        ];
+
+        #[cfg(target_pointer_width = "64")]
+        let limbs = [
+            u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+        ];
+
+        FieldBits::new(limbs)
+    }
+
+    fn char_le_bits() -> FieldBits<Self::ReprBits> {
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            FieldBits::new(MODULUS_LIMBS_32)
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        FieldBits::new(MODULUS.0)
+    }
+}
+
+impl<T> core::iter::Sum<T> for Scalar
+where
+    T: core::borrow::Borrow<Scalar>,
+{
+    fn sum<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = T>,
+    {
+        iter.fold(Self::zero(), |acc, item| acc + item.borrow())
+    }
+}
+
+impl<T> core::iter::Product<T> for Scalar
+where
+    T: core::borrow::Borrow<Scalar>,
+{
+    fn product<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = T>,
+    {
+        iter.fold(Self::one(), |acc, item| acc * item.borrow())
+    }
+}
+
+#[test]
+fn test_constants() {
+    assert_eq!(
+        Scalar::MODULUS,
+        "0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001",
+    );
+
+    assert_eq!(Scalar::from(2) * Scalar::TWO_INV, Scalar::ONE);
+
+    assert_eq!(
+        Scalar::ROOT_OF_UNITY * Scalar::ROOT_OF_UNITY_INV,
+        Scalar::ONE,
+    );
+
+    // ROOT_OF_UNITY^{2^s} mod m == 1
+    assert_eq!(
+        Scalar::ROOT_OF_UNITY.pow(&[1u64 << Scalar::S, 0, 0, 0]),
+        Scalar::ONE,
+    );
+
+    // DELTA^{t} mod m == 1
+    assert_eq!(
+        Scalar::DELTA.pow(&[
+            0xfffe_5bfe_ffff_ffff,
+            0x09a1_d805_53bd_a402,
+            0x299d_7d48_3339_d808,
+            0x0000_0000_73ed_a753,
+        ]),
+        Scalar::ONE,
+    );
 }
 
 #[test]
@@ -663,7 +859,10 @@ fn test_debug() {
 fn test_equality() {
     assert_eq!(Scalar::zero(), Scalar::zero());
     assert_eq!(Scalar::one(), Scalar::one());
-    assert_eq!(R2, R2);
+    #[allow(clippy::eq_op)]
+    {
+        assert_eq!(R2, R2);
+    }
 
     assert!(Scalar::zero() != Scalar::one());
     assert!(Scalar::one() != R2);
@@ -734,55 +933,45 @@ fn test_from_bytes() {
     );
 
     // -1 should work
-    assert!(
+    assert!(bool::from(
         Scalar::from_bytes(&[
             0, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8,
             216, 57, 51, 72, 125, 157, 41, 83, 167, 237, 115
         ])
         .is_some()
-        .unwrap_u8()
-            == 1
-    );
+    ));
 
     // modulus is invalid
-    assert!(
+    assert!(bool::from(
         Scalar::from_bytes(&[
             1, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8,
             216, 57, 51, 72, 125, 157, 41, 83, 167, 237, 115
         ])
         .is_none()
-        .unwrap_u8()
-            == 1
-    );
+    ));
 
     // Anything larger than the modulus is invalid
-    assert!(
+    assert!(bool::from(
         Scalar::from_bytes(&[
             2, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8,
             216, 57, 51, 72, 125, 157, 41, 83, 167, 237, 115
         ])
         .is_none()
-        .unwrap_u8()
-            == 1
-    );
-    assert!(
+    ));
+    assert!(bool::from(
         Scalar::from_bytes(&[
             1, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8,
             216, 58, 51, 72, 125, 157, 41, 83, 167, 237, 115
         ])
         .is_none()
-        .unwrap_u8()
-            == 1
-    );
-    assert!(
+    ));
+    assert!(bool::from(
         Scalar::from_bytes(&[
             1, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8,
             216, 57, 51, 72, 125, 157, 41, 83, 167, 237, 116
         ])
         .is_none()
-        .unwrap_u8()
-            == 1
-    );
+    ));
 }
 
 #[test]
@@ -814,7 +1003,7 @@ fn test_from_u512_r2() {
 
 #[test]
 fn test_from_u512_max() {
-    let max_u64 = 0xffffffffffffffff;
+    let max_u64 = 0xffff_ffff_ffff_ffff;
     assert_eq!(
         R3 - R,
         Scalar::from_u512([max_u64, max_u64, max_u64, max_u64, max_u64, max_u64, max_u64, max_u64])
@@ -849,10 +1038,10 @@ fn test_from_bytes_wide_negative_one() {
 fn test_from_bytes_wide_maximum() {
     assert_eq!(
         Scalar([
-            0xc62c1805439b73b1,
-            0xc2b9551e8ced218e,
-            0xda44ec81daf9a422,
-            0x5605aa601c162e79
+            0xc62c_1805_439b_73b1,
+            0xc2b9_551e_8ced_218e,
+            0xda44_ec81_daf9_a422,
+            0x5605_aa60_1c16_2e79,
         ]),
         Scalar::from_bytes_wide(&[0xff; 64])
     );
@@ -868,10 +1057,10 @@ fn test_zero() {
 
 #[cfg(test)]
 const LARGEST: Scalar = Scalar([
-    0xffffffff00000000,
-    0x53bda402fffe5bfe,
-    0x3339d80809a1d805,
-    0x73eda753299d7d48,
+    0xffff_ffff_0000_0000,
+    0x53bd_a402_fffe_5bfe,
+    0x3339_d808_09a1_d805,
+    0x73ed_a753_299d_7d48,
 ]);
 
 #[test]
@@ -882,10 +1071,10 @@ fn test_addition() {
     assert_eq!(
         tmp,
         Scalar([
-            0xfffffffeffffffff,
-            0x53bda402fffe5bfe,
-            0x3339d80809a1d805,
-            0x73eda753299d7d48
+            0xffff_fffe_ffff_ffff,
+            0x53bd_a402_fffe_5bfe,
+            0x3339_d808_09a1_d805,
+            0x73ed_a753_299d_7d48,
         ])
     );
 
@@ -983,7 +1172,7 @@ fn test_squaring() {
 
 #[test]
 fn test_inversion() {
-    assert_eq!(Scalar::zero().invert().is_none().unwrap_u8(), 1);
+    assert!(bool::from(Scalar::zero().invert().is_none()));
     assert_eq!(Scalar::one().invert().unwrap(), Scalar::one());
     assert_eq!((-&Scalar::one()).invert().unwrap(), -&Scalar::one());
 
@@ -1002,10 +1191,10 @@ fn test_inversion() {
 #[test]
 fn test_invert_is_pow() {
     let q_minus_2 = [
-        0xfffffffeffffffff,
-        0x53bda402fffe5bfe,
-        0x3339d80809a1d805,
-        0x73eda753299d7d48,
+        0xffff_fffe_ffff_ffff,
+        0x53bd_a402_fffe_5bfe,
+        0x3339_d808_09a1_d805,
+        0x73ed_a753_299d_7d48,
     ];
 
     let mut r1 = R;
@@ -1033,17 +1222,17 @@ fn test_sqrt() {
     }
 
     let mut square = Scalar([
-        0x46cd85a5f273077e,
-        0x1d30c47dd68fc735,
-        0x77f656f60beca0eb,
-        0x494aa01bdf32468d,
+        0x46cd_85a5_f273_077e,
+        0x1d30_c47d_d68f_c735,
+        0x77f6_56f6_0bec_a0eb,
+        0x494a_a01b_df32_468d,
     ]);
 
     let mut none_count = 0;
 
     for _ in 0..100 {
         let square_root = square.sqrt();
-        if square_root.is_none().unwrap_u8() == 1 {
+        if bool::from(square_root.is_none()) {
             none_count += 1;
         } else {
             assert_eq!(square_root.unwrap() * square_root.unwrap(), square);
@@ -1058,12 +1247,12 @@ fn test_sqrt() {
 fn test_from_raw() {
     assert_eq!(
         Scalar::from_raw([
-            0x1fffffffd,
-            0x5884b7fa00034802,
-            0x998c4fefecbc4ff5,
-            0x1824b159acc5056f
+            0x0001_ffff_fffd,
+            0x5884_b7fa_0003_4802,
+            0x998c_4fef_ecbc_4ff5,
+            0x1824_b159_acc5_056f,
         ]),
-        Scalar::from_raw([0xffffffffffffffff; 4])
+        Scalar::from_raw([0xffff_ffff_ffff_ffff; 4])
     );
 
     assert_eq!(Scalar::from_raw(MODULUS.0), Scalar::zero());
@@ -1074,11 +1263,26 @@ fn test_from_raw() {
 #[test]
 fn test_double() {
     let a = Scalar::from_raw([
-        0x1fff3231233ffffd,
-        0x4884b7fa00034802,
-        0x998c4fefecbc4ff3,
-        0x1824b159acc50562,
+        0x1fff_3231_233f_fffd,
+        0x4884_b7fa_0003_4802,
+        0x998c_4fef_ecbc_4ff3,
+        0x1824_b159_acc5_0562,
     ]);
 
     assert_eq!(a.double(), a + a);
+}
+
+#[cfg(feature = "zeroize")]
+#[test]
+fn test_zeroize() {
+    use zeroize::Zeroize;
+
+    let mut a = Scalar::from_raw([
+        0x1fff_3231_233f_fffd,
+        0x4884_b7fa_0003_4802,
+        0x998c_4fef_ecbc_4ff3,
+        0x1824_b159_acc5_0562,
+    ]);
+    a.zeroize();
+    assert!(bool::from(a.is_zero()));
 }

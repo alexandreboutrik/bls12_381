@@ -3,17 +3,25 @@
 This crate is a fork of the [BLS12-381 pairing-friendly elliptic curve construction crate](https://github.com/zkcrypto/bls12_381), providing serialisation. This crate is forked because the maintainers of BLS12-381 do not wish to merge the proposed serialisation standard in [merge request #12](https://github.com/zkcrypto/bls12_381/pull/12). This crate should be up to date with upstream, with the `gt-serialisation` branch merged.
 
 * **This implementation has not been reviewed or audited. Use at your own risk.**
-* This implementation targets Rust `1.36` or later.
+* This implementation targets Rust `1.63` or later.
 * This implementation does not require the Rust standard library.
 * All operations are constant time unless explicitly noted.
 
+## RFC process
+
+This crate follows the [zkcrypto RFC process](https://zkcrypto.github.io/rfcs/).
+If you want to propose "substantial" changes to this crate, please
+[create an RFC](https://github.com/zkcrypto/rfcs) for wider discussion.
+
 ## Features
 
+* `bits` (on by default): Enables APIs for obtaining bit iterators for scalars.
 * `groups` (on by default): Enables APIs for performing group arithmetic with G1, G2, and GT.
 * `pairings` (on by default): Enables some APIs for performing pairings.
 * `alloc` (on by default): Enables APIs that require an allocator; these include pairing optimizations.
 * `nightly`: Enables `subtle/nightly` which tries to prevent compiler optimizations that could jeopardize constant time operations. Requires the nightly Rust compiler.
-* `endo`: Enables optimizations that leverage curve endomorphisms, which may run foul of patents US7110538B2 and US7995752B2 set to expire in September 2020.
+* `experimental`: Enables experimental features. These features have no backwards-compatibility guarantees and may change at any time; users that depend on specific behaviour should pin an exact version of this crate. The current list of experimental features:
+  * Hashing to curves ([Internet Draft v16](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-hash-to-curve-16))
 
 ## [Documentation](https://docs.rs/bls12_381)
 
